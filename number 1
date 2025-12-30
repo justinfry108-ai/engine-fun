@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Simple Engine Power Simulator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>Simple Engine Power Simulator</h1>
+      <p>
+        Enter basic engine specs and estimate horsepower &amp; torque across the rev range.
+        This is a toy model, not a dyno – but it’s fun to play with.
+      </p>
+    </header>
+
+    <main class="app-main">
+      <!-- INPUT PANEL -->
+      <section class="panel panel-input">
+        <h2>Engine Parameters</h2>
+        <form id="engine-form">
+          <div class="grid">
+            <div class="form-group">
+              <label for="displacementL">Displacement (L)</label>
+              <input id="displacementL" type="number" step="0.1" min="0.2" value="2.0" required />
+              <small>Example: 2.0</small>
+            </div>
+
+            <div class="form-group">
+              <label for="cylinders">Cylinders</label>
+              <input id="cylinders" type="number" step="1" min="1" value="4" />
+              <small>For info only (not used in calc yet).</small>
+            </div>
+
+            <div class="form-group">
+              <label for="boreMm">Bore (mm)</label>
+              <input id="boreMm" type="number" step="0.1" min="40" value="86" />
+              <small>Example: 86 mm</small>
+            </div>
+
+            <div class="form-group">
+              <label for="strokeMm">Stroke (mm)</label>
+              <input id="strokeMm" type="number" step="0.1" min="40" value="86" />
+              <small>Example: 86 mm</small>
+            </div>
+
+            <div class="form-group">
+              <label for="redlineRpm">Redline (RPM)</label>
+              <input id="redlineRpm" type="number" step="100" min="3000" value="7000" required />
+              <small>Max simulated RPM.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="rpmStep">RPM Step</label>
+              <input id="rpmStep" type="number" step="100" min="100" value="250" />
+              <small>Resolution of the curve.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="vePeak">Peak Volumetric Efficiency (%)</label>
+              <input id="vePeak" type="number" step="1" min="50" max="110" value="95" />
+              <small>100% ≈ very well-breathing engine.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="boostPsi">Boost (psi)</label>
+              <div class="inline">
+                <input id="boostEnabled" type="checkbox" checked />
+                <input id="boostPsi" type="number" step="0.5" min="0" value="8" />
+              </div>
+              <small>Uncheck for NA.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="sizePenalty">Size Efficiency Penalty</label>
+              <input id="sizePenalty" type="number" step="0.5" min="0" max="10" value="3" />
+              <small>% hp/L penalty per extra liter over 2.0L.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="pistonSpeedLimit">Piston Speed Soft Limit (m/s)</label>
+              <input id="pistonSpeedLimit" type="number" step="1" min="15" value="25" />
+              <small>Above this, VE gradually falls.</small>
+            </div>
+          </div>
+
+          <button type="submit" class="btn-primary">Simulate</button>
+        </form>
+
+        <div id="warnings" class="warnings"></div>
+      </section>
+
+      <!-- OUTPUT PANEL -->
+      <section class="panel panel-output">
+        <h2>Results</h2>
+
+        <div class="summary">
+          <div class="summary-item">
+            <h3>Peak Power</h3>
+            <p><span id="peakHp">–</span> hp @ <span id="peakHpRpm">–</span> rpm</p>
+          </div>
+          <div class="summary-item">
+            <h3>Peak Torque</h3>
+            <p><span id="peakTq">–</span> lb-ft @ <span id="peakTqRpm">–</span> rpm</p>
+          </div>
+          <div class="summary-item">
+            <h3>Approx. hp per L</h3>
+            <p><span id="hpPerL">–</span> hp/L</p>
+          </div>
+        </div>
+
+        <div class="chart-container">
+          <canvas id="powerChart"></canvas>
+        </div>
+
+        <div class="table-container">
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th>RPM</th>
+                <th>HP</th>
+                <th>Torque (lb-ft)</th>
+                <th>VE (effective)</th>
+                <th>Mean Piston Speed (m/s)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Filled by JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>
+        This is a very simplified educational model – not a real dyno. Tune responsibly.
+      </p>
+    </footer>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
