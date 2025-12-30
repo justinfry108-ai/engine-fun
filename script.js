@@ -1,664 +1,592 @@
-/* ===========================================
-   SIMPLE ENGINE SIMULATOR v3
-   Features:
-   - Displacement from bore/stroke/cyl
-   - VE curve shaped by bore/stroke ratio
-   - Compression ratio & knock ceiling (by fuel + boost)
-   - RPM + displacement-based friction (fixed low-rpm zero-hp)
-   - Piston speed penalty past limit
-   - Fuel types: gasoline, diesel, methanol (BSFC, density, knock)
-   - Induction: NA, turbo, supercharger (lag vs instant, parasitic)
-   - Valvetrain: pushrod / SOHC / DOHC + valves/cyl (breathing shape)
-   - Outputs: HP, torque, VE, piston speed, BMEP, CFM, fuel mass & volume
-   =========================================== */
+// script.js – Engine Sim V4
+// ------------------------------------------------------
+// Assumes your HTML has something like:
+// <form id="engine-form">...</form>
+// <canvas id="dynoChart"></canvas>
+// <tbody id="resultsBody"></tbody>
+// <div id="summaryPeak"></div>
+// <div id="bmepInfo"></div>
+// <div id="cfmInfo"></div>
+// Adjust IDs in this file if your HTML uses different ones.
+// ------------------------------------------------------
 
-let chart;
+let dynoChart = null;
 
-/**
- * Compute displacement from bore, stroke, and cylinder count.
- * bore/stroke in mm, result in liters.
- */
-function computeDisplacementL(cylinders, boreMm, strokeMm) {
+document.addEventListener("DOMContentLoaded", () => {
+  const form = document.getElementById("engine-form");
+  if (form) {
+    form.addEventListener("submit", onFormSubmit);
+  }
+  initChart();
+});
+
+// ---------- Helpers -------------------------------------------------
+
+function hpFromTorque(tqLbFt, rpm) {
+  return (tqLbFt * rpm) / 5252;
+}
+
+function createRpmRange(redline, step = 250, idle = 1000) {
+  const maxRpm = Math.max(redline || 6000, idle + step);
+  const arr = [];
+  for (let r = idle; r <= maxRpm; r += step) {
+    arr.push(r);
+  }
+  return arr;
+}
+
+function litersFromBoreStroke(boreMm, strokeMm, cylinders) {
+  if (!boreMm || !strokeMm || !cylinders) return null;
   const boreCm = boreMm / 10;
   const strokeCm = strokeMm / 10;
-  const singleCc = (Math.PI / 4) * boreCm * boreCm * strokeCm;
-  const totalCc = singleCc * cylinders;
-  return totalCc / 1000; // cc -> L
+  const cylVolCc = (Math.PI / 4) * boreCm * boreCm * strokeCm;
+  const totalCc = cylVolCc * cylinders;
+  return totalCc / 1000; // cc → liters
 }
 
-/**
- * Clamp helper
- */
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
+function litersToCID(liters) {
+  return liters * 61.023744; // 1L ≈ 61.02 CID
 }
 
-/**
- * Fuel properties and knock limits
- */
-function getFuelProps(fuelType, inductionType) {
-  let densityLbPerGal;
-  let bsfcNa;
-  let bsfcBoosted;
-  let knockLimit; // limit on CR * PR product
-  let baselineCR;
+// crude VE estimate at a given rpm from torque
+// torque ~ k * displacementCID * VE  → VE ≈ T / (k * dispCID)
+function estimateVE(torqueLbFt, displacementL) {
+  const dispCID = litersToCID(displacementL);
+  if (dispCID <= 0) return 0.8;
+  const k = 1.35; // lb-ft per CID at ~100% VE (rough)
+  const ve = torqueLbFt / (k * dispCID);
+  return Math.max(0.3, Math.min(ve, 1.5)); // clamp
+}
 
-  switch (fuelType) {
-    case "diesel":
-      densityLbPerGal = 7.1;
-      bsfcNa = 0.38;
-      bsfcBoosted = 0.45;
-      knockLimit = 32; // diesel can tolerate high CR*PR
-      baselineCR = 17;
-      break;
-    case "methanol":
-      densityLbPerGal = 6.6;
-      bsfcNa = 0.75;
-      bsfcBoosted = 0.9;
-      knockLimit = 28; // very knock resistant
-      baselineCR = 12;
-      break;
-    case "gasoline":
-    default:
-      densityLbPerGal = 6.2;
-      bsfcNa = 0.45;
-      bsfcBoosted = 0.6;
-      knockLimit = 18; // pump gas-ish
-      baselineCR = 10;
-      break;
+// BMEP in bar from torque (lb-ft) and displacement (L)
+function bmepBar(torqueLbFt, displacementL) {
+  if (!displacementL || displacementL <= 0) return 0;
+  // Convert torque to Nm and displacement to m^3:
+  const torqueNm = torqueLbFt * 1.35581795;
+  const dispM3 = displacementL / 1000.0;
+  // 4-stroke: BMEP = 4π * T / Vd
+  const bmepaPa = (4 * Math.PI * torqueNm) / dispM3;
+  const bar = bmepaPa / 1e5;
+  return bar;
+}
+
+// theoretical CFM at given rpm & VE
+function cfmAtRpm(displacementL, rpm, ve) {
+  const dispCID = litersToCID(displacementL);
+  // 4-stroke theoretical CFM at 100% VE:
+  const cfm100 = (dispCID * rpm) / 3456;
+  return cfm100 * ve;
+}
+
+// ---------- Base NA Models (Gasoline) -------------------------------
+
+// 1) NA Gasoline – Pushrod 2-Valve
+function simulateNaPushrod2v(rpmRange, displacementL, compRatio) {
+  const dispCID = litersToCID(displacementL);
+  let baseTqPerCID = 1.25; // lb-ft per CID baseline
+  const compFactor = 1 + 0.02 * (compRatio - 9.0); // ~2% per CR point over 9
+  const peakTorque = baseTqPerCID * compFactor * dispCID;
+
+  const peakTqRpm = 4500;
+  const peakHpRpm = 6000;
+
+  const torque = [];
+  const hp = [];
+
+  for (const rpm of rpmRange) {
+    let tq;
+    if (rpm <= peakTqRpm) {
+      // quick low-end rise, but not crazy
+      const ratio = rpm / peakTqRpm;
+      tq = peakTorque * Math.pow(ratio, 0.85); // strong low-end
+    } else {
+      const dropRatio = (rpm - peakTqRpm) / (peakHpRpm - peakTqRpm);
+      // about 10–15% drop by peak HP
+      const drop = 0.12 * Math.pow(Math.max(0, Math.min(dropRatio, 1)), 1.2);
+      tq = peakTorque * (1 - drop);
+    }
+    // Avoid negative if rpm > peakHpRpm
+    if (rpm > peakHpRpm) {
+      const extra = (rpm - peakHpRpm) / (peakHpRpm * 0.5);
+      tq *= Math.max(0, 1 - 0.4 * extra);
+    }
+    torque.push(tq);
+    hp.push(hpFromTorque(tq, rpm));
   }
 
-  const bsfc = inductionType === "na" ? bsfcNa : bsfcBoosted;
-  return { densityLbPerGal, bsfc, knockLimit, baselineCR };
+  return { rpm: rpmRange, torque, hp };
 }
 
-/**
- * Fuel shape factor vs RPM.
- * Nudges torque behavior differently for each fuel.
- */
-function getFuelShapeFactor(fuelType, rpm, redlineRpm) {
-  const t = clamp(rpm / redlineRpm, 0, 1);
-  if (fuelType === "diesel") {
-    // Diesel: strong low-mid, falls off up high
-    return clamp(1.15 - 0.3 * t, 0.8, 1.15);
-  }
-  if (fuelType === "methanol") {
-    // Meth: loves high rpm a bit
-    return clamp(0.95 + 0.15 * t, 0.95, 1.12);
-  }
-  // Gasoline baseline
-  return 1;
-}
+// 2) NA Gasoline – DOHC Multi-Valve
+function simulateNaDohcMultivalve(rpmRange, displacementL, compRatio, numValves = 4) {
+  const dispCID = litersToCID(displacementL);
+  let baseTqPerCID = 1.20;
+  let effFactor = 1.0;
+  if (numValves >= 4) effFactor = 1.05; // 4V breathes better
+  const compFactor = 1 + 0.015 * (compRatio - 9.0);
 
-/**
- * Induction shape factor vs RPM.
- * Turbo: spool, more top-end.
- * Supercharger: strong low-end, mild fade at high RPM.
- */
-function getInductionShapeFactor(inductionType, rpm, redlineRpm) {
-  const t = clamp(rpm / redlineRpm, 0, 1);
+  const peakTorque = baseTqPerCID * effFactor * compFactor * dispCID;
+  const peakTqRpm = 6000;
+  const peakHpRpm = 7500;
 
-  if (inductionType === "turbo") {
-    const spoolStart = 0.35;
-    const spoolFull = 0.7;
-    if (t <= spoolStart) return 0.65;
-    if (t >= spoolFull) return 1.1;
-    const u = (t - spoolStart) / (spoolFull - spoolStart);
-    return 0.65 + (1.1 - 0.65) * u;
+  const torque = [];
+  const hp = [];
+
+  for (const rpm of rpmRange) {
+    let tq;
+    if (rpm <= peakTqRpm) {
+      const ratio = rpm / peakTqRpm;
+      tq = peakTorque * Math.pow(ratio, 1.05); // smoother rise
+    } else {
+      const dropRatio = (rpm - peakTqRpm) / (peakHpRpm - peakTqRpm);
+      const drop = 0.07 * Math.max(0, Math.min(dropRatio, 1)); // ~7% drop by peak HP
+      tq = peakTorque * (1 - drop);
+    }
+    if (rpm > peakHpRpm) {
+      const extra = (rpm - peakHpRpm) / (peakHpRpm * 0.5);
+      tq *= Math.max(0, 1 - 0.3 * extra);
+    }
+    torque.push(tq);
+    hp.push(hpFromTorque(tq, rpm));
   }
 
-  if (inductionType === "supercharger") {
-    // Pretty flat, but strongest early, slight fade up top
-    return clamp(1.12 - 0.1 * t, 1.0, 1.12);
-  }
-
-  return 1; // NA
+  return { rpm: rpmRange, torque, hp };
 }
 
-/**
- * Valvetrain + valves per cylinder breathing shape.
- * Pushrod: strong low-end, weaker high rpm.
- * SOHC: middle.
- * DOHC: strongest up high, especially with 4 valves.
- */
-function getValvetrainShapeFactor(valvetrainType, valvesPerCyl, rpm, redlineRpm) {
-  const t = clamp(rpm / redlineRpm, 0, 1);
+// ---------- Forced Induction Gasoline -------------------------------
 
-  // base low/high factors for valvetrain
-  let lowBase, highBase;
-  switch (valvetrainType) {
-    case "pushrod":
-      lowBase = 1.08;
-      highBase = 0.88;
-      break;
-    case "sohc":
-      lowBase = 1.02;
-      highBase = 1.0;
-      break;
-    case "dohc":
-    default:
-      lowBase = 0.98;
-      highBase = 1.10;
-      break;
-  }
+// 3) Turbocharged Gasoline – Pushrod 2-Valve
+function simulateTurboPushrod2v(rpmRange, displacementL, compRatio, boostPsi) {
+  const na = simulateNaPushrod2v(rpmRange, displacementL, compRatio);
+  const boostFactor = 1 + boostPsi / 14.7;
 
-  // valves adjustment: more valves = better high-rpm breathing
-  let valveHighBonus = 0;
-  if (valvesPerCyl >= 4) valveHighBonus = 0.05;
-  else if (valvesPerCyl === 3) valveHighBonus = 0.02;
+  const spoolRpm = 2500;
+  const fullBoostRpm = 3500;
+  const falloffRpm = 5500;
+  const redline = rpmRange[rpmRange.length - 1];
 
-  const low = lowBase;
-  const high = highBase + valveHighBonus;
+  const torque = [];
+  const hp = [];
 
-  return clamp(low + (high - low) * t, 0.8, 1.2);
-}
+  for (let i = 0; i < rpmRange.length; i++) {
+    const rpm = rpmRange[i];
+    const naTq = na.torque[i];
+    let tq;
 
-/**
- * Compression ratio factor:
- * Higher CR gives more potential VE/power,
- * but limited by knock factor later.
- */
-function getCompressionFactor(compressionRatio, baselineCR) {
-  const delta = compressionRatio - baselineCR;
-  // ~2% VE change per CR point, clamped
-  const factor = 1 + 0.02 * delta;
-  return clamp(factor, 0.85, 1.15);
-}
-
-/**
- * Knock factor:
- * CRPR = compressionRatio * pressureRatio
- * If CRPR exceeds fuel-specific knockLimit, VE is penalized.
- */
-function getKnockFactor(compressionRatio, pressureRatio, knockLimit) {
-  const crpr = compressionRatio * pressureRatio;
-  if (crpr <= knockLimit) return 1;
-  const ratio = knockLimit / crpr;
-  // Soften with exponent so it doesn't insta-die
-  return clamp(Math.pow(ratio, 0.9), 0.5, 1);
-}
-
-/**
- * Piston speed (m/s) for 4-stroke:
- * mps ≈ 2 * stroke * rpm / 60
- */
-function meanPistonSpeedMps(strokeM, rpm) {
-  return (2 * strokeM * rpm) / 60;
-}
-
-/**
- * Piston speed efficiency factor above limit.
- */
-function getPistonSpeedFactor(meanPistonSpeed, limit) {
-  if (meanPistonSpeed <= limit) return 1;
-  const over = meanPistonSpeed - limit;
-  // 4% VE loss per 1 m/s over limit, floored at 40%
-  return clamp(1 - 0.04 * over, 0.4, 1);
-}
-
-/**
- * Size efficiency penalty for large engines.
- */
-function getSizeEfficiency(displacementL, sizePenaltyPerL) {
-  const extraLiters = Math.max(0, displacementL - 2);
-  const factor = 1 - (sizePenaltyPerL / 100) * extraLiters;
-  return clamp(factor, 0.65, 1.05);
-}
-
-/**
- * Friction & pumping loss model:
- * Scales with displacement and RPM (linear + mild quadratic),
- * and clamped so it never destroys all power at low RPM.
- */
-function getFrictionHp(displacementL, rpmK, fuelType) {
-  const baseFricPerL = 2.5;    // hp per liter at 0 rpm (conceptually)
-  const slopeFricPerL = 1.4;   // hp per liter per 1000 rpm
-  const quadFricPerL = 0.25;   // extra term at high rpm
-
-  let frictionHp =
-    displacementL *
-    (baseFricPerL + slopeFricPerL * rpmK) +
-    quadFricPerL * displacementL * rpmK * rpmK;
-
-  // Diesel heavy bottom end = slightly more friction
-  if (fuelType === "diesel") {
-    frictionHp *= 1.1;
-  }
-
-  return frictionHp;
-}
-
-/**
- * Supercharger parasitic loss (hp).
- * Roughly scales with boost, rpm, and displacement.
- */
-function getSuperchargerParasiticHp(displacementL, rpmK, boostPsi) {
-  if (boostPsi <= 0) return 0;
-  const boostFactor = boostPsi / 10; // normalized
-  return boostFactor * displacementL * rpmK * 2.0;
-}
-
-/**
- * Core simulation function.
- */
-function simulateEngine(params) {
-  const {
-    cylinders,
-    boreMm,
-    strokeMm,
-    redlineRpm,
-    rpmStep,
-    vePeakPercent,
-    sizePenaltyPerL,
-    pistonSpeedLimit,
-    fuelType,
-    inductionType,
-    boostPsiInput,
-    compressionRatio,
-    valvesPerCyl,
-    valvetrainType
-  } = params;
-
-  const displacementL = computeDisplacementL(cylinders, boreMm, strokeMm);
-  const displacementCi = displacementL * 61.024; // cubic inches
-
-  const points = [];
-
-  // Boost & pressure ratio
-  const boostPsi = inductionType === "na" ? 0 : Math.max(0, boostPsiInput || 0);
-  const pressureRatio = 1 + boostPsi / 14.7;
-
-  // Fuel props (BSFC + density + knock limit)
-  const { densityLbPerGal, bsfc, knockLimit, baselineCR } = getFuelProps(
-    fuelType,
-    inductionType
-  );
-
-  const sizeEff = getSizeEfficiency(displacementL, sizePenaltyPerL);
-  const veMax = vePeakPercent / 100;
-
-  // Bore/stroke ratio & VE curve shape
-  const bsr = boreMm / strokeMm;
-  const bsrClamp = clamp(bsr, 0.7, 1.6);
-  const bsrT = (bsrClamp - 0.7) / (1.6 - 0.7); // 0..1
-
-  const vePeakRpm = redlineRpm * (0.5 + 0.4 * bsrT); // 0.5–0.9 of redline
-  const veWidth = redlineRpm * (0.35 - 0.17 * bsrT); // 0.35–0.18 of redline
-
-  const strokeM = strokeMm / 1000;
-
-  // Base constant: hp ≈ C * displacement[L] * PR * VE * (rpm / 1000)
-  const C = 13.5;
-
-  const rpmStart = 1000;
-
-  for (let rpm = rpmStart; rpm <= redlineRpm; rpm += rpmStep) {
-    const rpmK = rpm / 1000;
-
-    // Base VE vs RPM (Gaussian)
-    const veRpmRaw =
-      veMax * Math.exp(-0.5 * Math.pow((rpm - vePeakRpm) / veWidth, 2));
-
-    // Piston speed & penalty
-    const mps = meanPistonSpeedMps(strokeM, rpm);
-    const pistonFactor = getPistonSpeedFactor(mps, pistonSpeedLimit);
-
-    // Fuel shape (diesel low-end grunt, meth upper revs, etc.)
-    const fuelShape = getFuelShapeFactor(fuelType, rpm, redlineRpm);
-
-    // Induction shape (turbo spool, SC punch)
-    const inductionShape = getInductionShapeFactor(inductionType, rpm, redlineRpm);
-
-    // Valvetrain + valves shape
-    const valvetrainShape = getValvetrainShapeFactor(
-      valvetrainType,
-      valvesPerCyl,
-      rpm,
-      redlineRpm
-    );
-
-    // Compression potential
-    const compressionFactor = getCompressionFactor(compressionRatio, baselineCR);
-
-    // Combine all VE multipliers before knock
-    let effectiveVE =
-      veRpmRaw *
-      sizeEff *
-      pistonFactor *
-      fuelShape *
-      inductionShape *
-      valvetrainShape *
-      compressionFactor;
-
-    // Knock penalty (CR * PR too high)
-    const knockFactor = getKnockFactor(compressionRatio, pressureRatio, knockLimit);
-    effectiveVE *= knockFactor;
-
-    // Bound VE
-    effectiveVE = clamp(effectiveVE, 0, 1.25);
-
-    // Gross indicated power (before friction & parasitics)
-    const grossHp = C * displacementL * pressureRatio * effectiveVE * rpmK;
-
-    // Friction & pumping losses
-    let frictionHp = getFrictionHp(displacementL, rpmK, fuelType);
-
-    // Supercharger parasitic loss
-    let parasiticHp = 0;
-    if (inductionType === "supercharger") {
-      parasiticHp = getSuperchargerParasiticHp(displacementL, rpmK, boostPsi);
+    if (rpm < spoolRpm) {
+      tq = naTq;
+    } else if (rpm < fullBoostRpm) {
+      const ramp = (rpm - spoolRpm) / (fullBoostRpm - spoolRpm);
+      tq = naTq * (1 + ramp * (boostFactor - 1));
+    } else if (rpm <= falloffRpm) {
+      tq = naTq * boostFactor;
+    } else {
+      const dropRatio = (rpm - falloffRpm) / (redline - falloffRpm);
+      const currentBoostFactor = boostFactor * (1 - 0.5 * Math.max(0, Math.min(dropRatio, 1)));
+      tq = naTq * currentBoostFactor;
     }
 
-    // Don't let friction+parasitic completely obliterate low-rpm power
-    const maxLoss = grossHp * 0.85;
-    const totalLoss = Math.min(frictionHp + parasiticHp, maxLoss);
+    torque.push(tq);
+    hp.push(hpFromTorque(tq, rpm));
+  }
 
-    let netHp = Math.max(grossHp - totalLoss, 0);
+  return { rpm: rpmRange, torque, hp };
+}
 
-    // Low-rpm floor so big engines don't show zero output
-    const lowRpmFloor = displacementL * 1.2 * Math.pow(rpmK, 0.7); // hp
-    if (netHp < lowRpmFloor) netHp = lowRpmFloor;
+// 4) Turbocharged Gasoline – DOHC Multi-Valve
+function simulateTurboDohcMultivalve(rpmRange, displacementL, compRatio, boostPsi) {
+  const na = simulateNaDohcMultivalve(rpmRange, displacementL, compRatio, 4);
+  const boostFactor = 1 + boostPsi / 14.7;
 
-    const torque = rpm > 0 ? (netHp * 5252) / rpm : 0;
+  const spoolRpm = 1500;
+  const fullBoostRpm = 2000;
+  const plateauEndRpm = 5000;
+  const redline = rpmRange[rpmRange.length - 1];
 
-    // BMEP (psi): approx 150.8 * torque(lb-ft) / displacement(L)
-    const bmepPsi = displacementL > 0 ? (150.8 * torque) / displacementL : 0;
+  const torque = [];
+  const hp = [];
 
-    // Airflow (CFM): 4-stroke approx
-    // CFM = (disp_ci * rpm * VE * PR) / 3456
-    const cfm = (displacementCi * rpm * effectiveVE * pressureRatio) / 3456;
+  for (let i = 0; i < rpmRange.length; i++) {
+    const rpm = rpmRange[i];
+    const naTq = na.torque[i];
+    let tq;
 
-    // Fuel consumption
-    const fuelLbPerHr = netHp * bsfc;
-    const fuelGalPerHr =
-      densityLbPerGal > 0 ? fuelLbPerHr / densityLbPerGal : 0;
+    if (rpm < spoolRpm) {
+      tq = naTq;
+    } else if (rpm < fullBoostRpm) {
+      const ramp = (rpm - spoolRpm) / (fullBoostRpm - spoolRpm);
+      tq = naTq * (1 + ramp * (boostFactor - 1));
+    } else if (rpm <= plateauEndRpm) {
+      tq = naTq * boostFactor; // flat-ish plateau
+    } else {
+      const dropRatio = (rpm - plateauEndRpm) / (redline - plateauEndRpm);
+      const drop = 0.2 * Math.max(0, Math.min(dropRatio, 1)); // ~20% drop by redline
+      tq = naTq * boostFactor * (1 - drop);
+    }
 
-    points.push({
-      rpm,
-      hp: netHp,
-      torque,
-      effectiveVE,
-      meanPistonSpeed: mps,
-      bmepPsi,
-      cfm,
-      fuelLbPerHr,
-      fuelGalPerHr
-    });
+    torque.push(tq);
+    hp.push(hpFromTorque(tq, rpm));
+  }
+
+  return { rpm: rpmRange, torque, hp };
+}
+
+// 5) Supercharged Gasoline – Works with pushrod or DOHC base
+function simulateSuperchargedGasoline(
+  rpmRange,
+  displacementL,
+  compRatio,
+  boostPsi,
+  valvetrain // 'pushrod' or 'dohc'
+) {
+  let na;
+  if (valvetrain === "pushrod") {
+    na = simulateNaPushrod2v(rpmRange, displacementL, compRatio);
+  } else {
+    na = simulateNaDohcMultivalve(rpmRange, displacementL, compRatio, 4);
+  }
+
+  const boostFactor = 1 + boostPsi / 14.7;
+  const torque = [];
+  const hp = [];
+  const maxRpm = rpmRange[rpmRange.length - 1];
+
+  for (let i = 0; i < rpmRange.length; i++) {
+    const rpm = rpmRange[i];
+    const naTq = na.torque[i];
+    let effectiveBoost;
+
+    // Simulate Roots/twin-screw style: almost instant boost
+    if (rpm < 1500) {
+      effectiveBoost = 1 + (boostFactor - 1) * (rpm / 1500);
+    } else {
+      effectiveBoost = boostFactor;
+    }
+
+    // A little efficiency drop at extreme top-end (blower drag/heat)
+    let tq = naTq * effectiveBoost;
+    if (rpm > 0.9 * maxRpm) {
+      const extra = (rpm - 0.9 * maxRpm) / (0.1 * maxRpm);
+      tq *= Math.max(0.8, 1 - 0.2 * extra);
+    }
+
+    torque.push(tq);
+    hp.push(hpFromTorque(tq, rpm));
+  }
+
+  return { rpm: rpmRange, torque, hp };
+}
+
+// ---------- Turbo Diesel --------------------------------------------
+
+function simulateTurboDiesel(rpmRange, displacementL, boostPsi, heavyDuty = true) {
+  const dispCID = litersToCID(displacementL);
+  const boostFactor = 1 + boostPsi / 14.7;
+
+  const baseTqPerCID = 1.5; // NA diesel baseline
+  const peakTorque = baseTqPerCID * boostFactor * dispCID;
+
+  let peakTqRpm, redline;
+  if (heavyDuty) {
+    peakTqRpm = 1500;
+    redline = 2500;
+  } else {
+    peakTqRpm = 2000;
+    redline = 4000;
+  }
+
+  const plateauEndRpm = 0.7 * redline;
+
+  const torque = [];
+  const hp = [];
+
+  for (const rpm of rpmRange) {
+    let tq;
+
+    if (rpm <= peakTqRpm) {
+      const ratio = rpm / peakTqRpm;
+      tq = peakTorque * Math.pow(ratio, 0.5); // very strong low-end
+      if (tq > peakTorque) tq = peakTorque;
+    } else if (rpm <= plateauEndRpm) {
+      tq = peakTorque;
+    } else {
+      const dropRatio = (rpm - plateauEndRpm) / (redline - plateauEndRpm);
+      const drop = 0.8 * Math.pow(Math.max(0, Math.min(dropRatio, 1)), 1.2);
+      tq = peakTorque * (1 - drop);
+    }
+
+    torque.push(tq);
+    hp.push(hpFromTorque(tq, rpm));
+  }
+
+  return { rpm: rpmRange, torque, hp };
+}
+
+// ---------- Methanol Racing -----------------------------------------
+
+function simulateMethanolRacing(rpmRange, displacementL, compRatio, boostPsi = 0) {
+  // High-output base: DOHC NA curve
+  const na = simulateNaDohcMultivalve(rpmRange, displacementL, compRatio, 4);
+
+  const fuelFactor = 1.15; // ~15% extra torque vs gasoline
+  const boostFactor = 1 + boostPsi / 14.7;
+
+  const torque = [];
+  const hp = [];
+  const maxRpm = rpmRange[rpmRange.length - 1];
+
+  for (let i = 0; i < rpmRange.length; i++) {
+    const rpm = rpmRange[i];
+    let tq = na.torque[i] * fuelFactor * boostFactor;
+
+    // Better high-RPM stability: almost no drop at the top, maybe slight bump
+    if (rpm > 0.8 * maxRpm) {
+      const extra = (rpm - 0.8 * maxRpm) / (0.2 * maxRpm);
+      tq *= 1 + 0.05 * Math.max(0, Math.min(extra, 1)); // up to +5% near very top
+    }
+
+    torque.push(tq);
+    hp.push(hpFromTorque(tq, rpm));
+  }
+
+  return { rpm: rpmRange, torque, hp };
+}
+
+// ---------- Main Dispatcher -----------------------------------------
+
+function simulateEngine(config) {
+  const {
+    displacementL,
+    compRatio,
+    redline,
+    induction,
+    boostPsi,
+    fuel,
+    valvetrain,
+  } = config;
+
+  const rpmRange = createRpmRange(redline, 250, 1000);
+
+  // Fuel overrides
+  if (fuel === "diesel") {
+    const heavy = displacementL >= 5.0;
+    return simulateTurboDiesel(rpmRange, displacementL, boostPsi || 16, heavy);
+  }
+  if (fuel === "methanol") {
+    return simulateMethanolRacing(rpmRange, displacementL, compRatio || 13, boostPsi || 0);
+  }
+
+  // Gasoline paths
+  if (induction === "na") {
+    if (valvetrain === "pushrod") {
+      return simulateNaPushrod2v(rpmRange, displacementL, compRatio);
+    }
+    // default to DOHC-ish behavior
+    return simulateNaDohcMultivalve(rpmRange, displacementL, compRatio, config.valvesPerCyl || 4);
+  }
+
+  if (induction === "turbo") {
+    if (valvetrain === "pushrod") {
+      return simulateTurboPushrod2v(rpmRange, displacementL, compRatio, boostPsi || 7);
+    }
+    return simulateTurboDohcMultivalve(rpmRange, displacementL, compRatio, boostPsi || 7);
+  }
+
+  if (induction === "supercharger") {
+    return simulateSuperchargedGasoline(
+      rpmRange,
+      displacementL,
+      compRatio,
+      boostPsi || 7,
+      valvetrain === "pushrod" ? "pushrod" : "dohc"
+    );
+  }
+
+  // Fallback: NA DOHC
+  return simulateNaDohcMultivalve(rpmRange, displacementL, compRatio, config.valvesPerCyl || 4);
+}
+
+// ---------- UI Wiring ------------------------------------------------
+
+function readConfigFromForm() {
+  const getVal = (id) => {
+    const el = document.getElementById(id);
+    return el ? el.value : "";
+  };
+
+  const displacementInput = parseFloat(getVal("displacementL")) || 0;
+  const boreMm = parseFloat(getVal("boreMm")) || 0;
+  const strokeMm = parseFloat(getVal("strokeMm")) || 0;
+  const cylinders = parseInt(getVal("cylinders")) || 0;
+  const compRatio = parseFloat(getVal("compression")) || 10.0;
+  const redline = parseInt(getVal("redline")) || 7000;
+  const induction = getVal("induction") || "na"; // "na" | "turbo" | "supercharger"
+  const fuel = getVal("fuel") || "gasoline"; // "gasoline" | "diesel" | "methanol"
+  const valvetrain = getVal("valvetrain") || "dohc"; // "pushrod" | "sohc" | "dohc"
+  const valvesPerCyl = parseInt(getVal("valvesPerCyl")) || 4;
+  const boostPsi = parseFloat(getVal("boostPsi")) || 0;
+
+  let displacementL = displacementInput;
+  if (!displacementL && boreMm && strokeMm && cylinders) {
+    displacementL = litersFromBoreStroke(boreMm, strokeMm, cylinders);
   }
 
   return {
-    points,
     displacementL,
-    densityLbPerGal
+    boreMm,
+    strokeMm,
+    cylinders,
+    compRatio,
+    redline,
+    induction,
+    fuel,
+    valvetrain,
+    valvesPerCyl,
+    boostPsi,
   };
 }
 
-/**
- * Wire up UI
- */
-document.addEventListener("DOMContentLoaded", () => {
-  const form = document.getElementById("engine-form");
-  const warningsEl = document.getElementById("warnings");
+function onFormSubmit(e) {
+  e.preventDefault();
 
-  const cylindersEl = document.getElementById("cylinders");
-  const boreEl = document.getElementById("boreMm");
-  const strokeEl = document.getElementById("strokeMm");
-  const displacementEl = document.getElementById("displacementL");
-  const compressionEl = document.getElementById("compressionRatio");
-  const redlineEl = document.getElementById("redlineRpm");
-  const rpmStepEl = document.getElementById("rpmStep");
-  const vePeakEl = document.getElementById("vePeak");
-  const sizePenaltyEl = document.getElementById("sizePenalty");
-  const pistonLimitEl = document.getElementById("pistonSpeedLimit");
-  const fuelTypeEl = document.getElementById("fuelType");
-  const inductionTypeEl = document.getElementById("inductionType");
-  const boostPsiEl = document.getElementById("boostPsi");
-  const valvetrainTypeEl = document.getElementById("valvetrainType");
-  const valvesPerCylEl = document.getElementById("valvesPerCyl");
-
-  const peakHpEl = document.getElementById("peakHp");
-  const peakHpRpmEl = document.getElementById("peakHpRpm");
-  const peakTqEl = document.getElementById("peakTq");
-  const peakTqRpmEl = document.getElementById("peakTqRpm");
-  const hpPerLEl = document.getElementById("hpPerL");
-  const fuelPeakLbEl = document.getElementById("fuelPeakLb");
-  const fuelPeakGalEl = document.getElementById("fuelPeakGal");
-  const bmepPeakPsiEl = document.getElementById("bmepPeakPsi");
-  const cfmPeakEl = document.getElementById("cfmPeak");
-
-  const tableBody = document.querySelector("#results-table tbody");
-  const chartCanvas = document.getElementById("powerChart");
-
-  // Displacement is computed from geometry
-  displacementEl.readOnly = true;
-
-  // Enable/disable boost psi based on induction type
-  function updateBoostState() {
-    const type = inductionTypeEl.value;
-    boostPsiEl.disabled = type === "na";
+  const config = readConfigFromForm();
+  if (!config.displacementL || config.displacementL <= 0 || !config.redline) {
+    alert("Please enter a valid displacement and RPM limit.");
+    return;
   }
-  updateBoostState();
-  inductionTypeEl.addEventListener("change", updateBoostState);
 
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    warningsEl.textContent = "";
+  const result = simulateEngine(config);
+  updateChart(result.rpm, result.torque, result.hp);
+  updateResultsTable(result.rpm, result.torque, result.hp, config.displacementL);
+  updateSummary(result.rpm, result.torque, result.hp, config.displacementL);
+}
 
-    const cylinders = parseInt(cylindersEl.value, 10);
-    const boreMm = parseFloat(boreEl.value);
-    const strokeMm = parseFloat(strokeEl.value);
-    let redlineRpm = parseInt(redlineEl.value, 10);
-    const rpmStep = parseInt(rpmStepEl.value, 10);
-    const vePeakPercent = parseFloat(vePeakEl.value);
-    const sizePenaltyPerL = parseFloat(sizePenaltyEl.value);
-    const pistonSpeedLimit = parseFloat(pistonLimitEl.value);
-    const fuelType = fuelTypeEl.value;
-    const inductionType = inductionTypeEl.value;
-    const compressionRatio = parseFloat(compressionEl.value);
-    const valvesPerCyl = parseInt(valvesPerCylEl.value, 10);
-    const valvetrainType = valvetrainTypeEl.value;
+// ---------- Chart.js -------------------------------------------------
 
-    let boostPsi = 0;
-    if (inductionType !== "na") {
-      boostPsi = Math.max(0, parseFloat(boostPsiEl.value) || 0);
-    }
+function initChart() {
+  const ctx = document.getElementById("dynoChart");
+  if (!ctx) return;
 
-    // Basic validation
-    if (
-      !cylinders ||
-      !boreMm ||
-      !strokeMm ||
-      !redlineRpm ||
-      !rpmStep ||
-      !compressionRatio
-    ) {
-      warningsEl.textContent = "Please fill in all required numeric fields.";
-      return;
-    }
-
-    if (redlineRpm < 3000) {
-      warningsEl.textContent = "Redline must be at least 3000 rpm.";
-      return;
-    }
-
-    if (rpmStep >= redlineRpm) {
-      warningsEl.textContent = "RPM step is too large relative to redline.";
-      return;
-    }
-
-    if (redlineRpm > 15000) {
-      redlineRpm = 15000;
-      redlineEl.value = 15000;
-      warningsEl.textContent = "Redline capped at 15,000 rpm for this simple model.";
-    }
-
-    const params = {
-      cylinders,
-      boreMm,
-      strokeMm,
-      redlineRpm,
-      rpmStep,
-      vePeakPercent,
-      sizePenaltyPerL,
-      pistonSpeedLimit,
-      fuelType,
-      inductionType,
-      boostPsiInput: boostPsi,
-      compressionRatio,
-      valvesPerCyl,
-      valvetrainType
-    };
-
-    const { points, displacementL } = simulateEngine(params);
-
-    if (!points.length) {
-      warningsEl.textContent = "No RPM points generated – check your inputs.";
-      return;
-    }
-
-    // Show computed displacement:
-    displacementEl.value = displacementL.toFixed(2);
-
-    // Find peaks & additional info
-    let peakHp = -Infinity;
-    let peakHpRpm = 0;
-    let peakTq = -Infinity;
-    let peakTqRpm = 0;
-    let maxHp = 0;
-    let pointAtPeakHp = null;
-
-    points.forEach((pt) => {
-      if (pt.hp > peakHp) {
-        peakHp = pt.hp;
-        peakHpRpm = pt.rpm;
-        pointAtPeakHp = pt;
-      }
-      if (pt.torque > peakTq) {
-        peakTq = pt.torque;
-        peakTqRpm = pt.rpm;
-      }
-      if (pt.hp > maxHp) maxHp = pt.hp;
-    });
-
-    const hpPerL = displacementL > 0 ? maxHp / displacementL : 0;
-
-    // Update summary
-    peakHpEl.textContent = peakHp.toFixed(1);
-    peakHpRpmEl.textContent = peakHpRpm.toLocaleString();
-    peakTqEl.textContent = peakTq.toFixed(1);
-    peakTqRpmEl.textContent = peakTqRpm.toLocaleString();
-    hpPerLEl.textContent = hpPerL.toFixed(1);
-
-    if (pointAtPeakHp) {
-      fuelPeakLbEl.textContent = pointAtPeakHp.fuelLbPerHr.toFixed(1);
-      fuelPeakGalEl.textContent = pointAtPeakHp.fuelGalPerHr.toFixed(2);
-      bmepPeakPsiEl.textContent = pointAtPeakHp.bmepPsi.toFixed(1);
-      cfmPeakEl.textContent = pointAtPeakHp.cfm.toFixed(0);
-    } else {
-      fuelPeakLbEl.textContent = "–";
-      fuelPeakGalEl.textContent = "–";
-      bmepPeakPsiEl.textContent = "–";
-      cfmPeakEl.textContent = "–";
-    }
-
-    // Update table
-    tableBody.innerHTML = "";
-    points.forEach((pt) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${pt.rpm.toLocaleString()}</td>
-        <td>${pt.hp.toFixed(1)}</td>
-        <td>${pt.torque.toFixed(1)}</td>
-        <td>${(pt.effectiveVE * 100).toFixed(1)}%</td>
-        <td>${pt.meanPistonSpeed.toFixed(1)}</td>
-        <td>${pt.bmepPsi.toFixed(1)}</td>
-        <td>${pt.cfm.toFixed(0)}</td>
-        <td>${pt.fuelLbPerHr.toFixed(1)}</td>
-        <td>${pt.fuelGalPerHr.toFixed(2)}</td>
-      `;
-      tableBody.appendChild(tr);
-    });
-
-    // Update chart
-    const labels = points.map((pt) => pt.rpm);
-    const hpData = points.map((pt) => pt.hp);
-    const tqData = points.map((pt) => pt.torque);
-
-    if (chart) {
-      chart.data.labels = labels;
-      chart.data.datasets[0].data = hpData;
-      chart.data.datasets[1].data = tqData;
-      chart.update();
-    } else {
-      chart = new Chart(chartCanvas, {
-        type: "line",
-        data: {
-          labels,
-          datasets: [
-            {
-              label: "Horsepower",
-              data: hpData,
-              yAxisID: "y1",
-              borderWidth: 2,
-              tension: 0.25
-            },
-            {
-              label: "Torque (lb-ft)",
-              data: tqData,
-              yAxisID: "y2",
-              borderWidth: 2,
-              borderDash: [4, 4],
-              tension: 0.25
-            }
-          ]
+  dynoChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: "Torque (lb-ft)",
+          data: [],
+          yAxisID: "y1",
+          borderWidth: 2,
+          tension: 0.2,
         },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          interaction: {
-            mode: "index",
-            intersect: false
-          },
-          scales: {
-            x: {
-              title: {
-                display: true,
-                text: "Engine Speed (RPM)"
-              }
-            },
-            y1: {
-              position: "left",
-              title: {
-                display: true,
-                text: "Horsepower"
-              }
-            },
-            y2: {
-              position: "right",
-              grid: {
-                drawOnChartArea: false
-              },
-              title: {
-                display: true,
-                text: "Torque (lb-ft)"
-              }
-            }
-          },
-          plugins: {
-            legend: {
-              display: true
-            },
-            tooltip: {
-              callbacks: {
-                label: (ctx) => {
-                  const label = ctx.dataset.label || "";
-                  return `${label}: ${ctx.parsed.y.toFixed(1)}`;
-                }
-              }
-            }
-          }
-        }
-      });
-    }
+        {
+          label: "Horsepower",
+          data: [],
+          yAxisID: "y2",
+          borderWidth: 2,
+          borderDash: [5, 5],
+          tension: 0.2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      scales: {
+        y1: {
+          type: "linear",
+          position: "left",
+          title: { display: true, text: "Torque (lb-ft)" },
+        },
+        y2: {
+          type: "linear",
+          position: "right",
+          title: { display: true, text: "Horsepower" },
+          grid: { drawOnChartArea: false },
+        },
+        x: {
+          title: { display: true, text: "Engine Speed (RPM)" },
+        },
+      },
+    },
   });
-});
+}
+
+function updateChart(rpm, torque, hp) {
+  if (!dynoChart) return;
+  dynoChart.data.labels = rpm;
+  dynoChart.data.datasets[0].data = torque;
+  dynoChart.data.datasets[1].data = hp;
+  dynoChart.update();
+}
+
+// ---------- Results Table & Summary ---------------------------------
+
+function updateResultsTable(rpmArr, torqueArr, hpArr, displacementL) {
+  const tbody = document.getElementById("resultsBody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  for (let i = 0; i < rpmArr.length; i++) {
+    const rpm = rpmArr[i];
+    const tq = torqueArr[i];
+    const hp = hpArr[i];
+
+    const ve = estimateVE(tq, displacementL);
+    const cfm = cfmAtRpm(displacementL, rpm, ve);
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${rpm}</td>
+      <td>${tq.toFixed(1)}</td>
+      <td>${hp.toFixed(1)}</td>
+      <td>${(ve * 100).toFixed(0)}%</td>
+      <td>${cfm.toFixed(0)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function updateSummary(rpmArr, torqueArr, hpArr, displacementL) {
+  const summaryDiv = document.getElementById("summaryPeak");
+  const bmepDiv = document.getElementById("bmepInfo");
+  const cfmDiv = document.getElementById("cfmInfo");
+
+  let peakHp = -Infinity;
+  let peakHpRpm = 0;
+  let peakTq = -Infinity;
+  let peakTqRpm = 0;
+
+  for (let i = 0; i < rpmArr.length; i++) {
+    if (hpArr[i] > peakHp) {
+      peakHp = hpArr[i];
+      peakHpRpm = rpmArr[i];
+    }
+    if (torqueArr[i] > peakTq) {
+      peakTq = torqueArr[i];
+      peakTqRpm = rpmArr[i];
+    }
+  }
+
+  if (summaryDiv) {
+    summaryDiv.textContent = `Peak torque: ${peakTq.toFixed(
+      1
+    )} lb-ft @ ${peakTqRpm} RPM | Peak power: ${peakHp.toFixed(
+      1
+    )} hp @ ${peakHpRpm} RPM`;
+  }
+
+  const peakBmep = bmepBar(peakTq, displacementL);
+  if (bmepDiv) {
+    bmepDiv.textContent = `Approx. peak BMEP: ${peakBmep.toFixed(
+      1
+    )} bar (very rough estimate)`;
+  }
+
+  const veAtPeakTq = estimateVE(peakTq, displacementL);
+  const cfmAtPeakTq = cfmAtRpm(displacementL, peakTqRpm, veAtPeakTq);
+  if (cfmDiv) {
+    cfmDiv.textContent = `Approx. airflow at peak torque: ${cfmAtPeakTq.toFixed(
+      0
+    )} CFM @ ${peakTqRpm} RPM`;
+  }
+}
