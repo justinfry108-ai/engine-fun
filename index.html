@@ -27,13 +27,13 @@
             <div class="form-group">
               <label for="displacementL">Displacement (L)</label>
               <input id="displacementL" type="number" step="0.1" min="0.2" value="2.0" required />
-              <small>Example: 2.0</small>
+              <small>Computed from bore, stroke &amp; cylinders.</small>
             </div>
 
             <div class="form-group">
               <label for="cylinders">Cylinders</label>
               <input id="cylinders" type="number" step="1" min="1" value="4" />
-              <small>For info only (not used in calc yet).</small>
+              <small>Example: 4, 6, 8, etc.</small>
             </div>
 
             <div class="form-group">
@@ -62,17 +62,8 @@
 
             <div class="form-group">
               <label for="vePeak">Peak Volumetric Efficiency (%)</label>
-              <input id="vePeak" type="number" step="1" min="50" max="110" value="95" />
+              <input id="vePeak" type="number" step="1" min="50" max="120" value="95" />
               <small>100% ≈ very well-breathing engine.</small>
-            </div>
-
-            <div class="form-group">
-              <label for="boostPsi">Boost (psi)</label>
-              <div class="inline">
-                <input id="boostEnabled" type="checkbox" checked />
-                <input id="boostPsi" type="number" step="0.5" min="0" value="8" />
-              </div>
-              <small>Uncheck for NA.</small>
             </div>
 
             <div class="form-group">
@@ -85,6 +76,32 @@
               <label for="pistonSpeedLimit">Piston Speed Soft Limit (m/s)</label>
               <input id="pistonSpeedLimit" type="number" step="1" min="15" value="25" />
               <small>Above this, VE gradually falls.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="fuelType">Fuel Type</label>
+              <select id="fuelType">
+                <option value="gasoline">Gasoline</option>
+                <option value="diesel">Diesel</option>
+                <option value="methanol">Methanol</option>
+              </select>
+              <small>Affects torque shape &amp; fuel use.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="inductionType">Induction Type</label>
+              <select id="inductionType">
+                <option value="na">Naturally Aspirated</option>
+                <option value="turbo">Turbocharger</option>
+                <option value="supercharger">Supercharger</option>
+              </select>
+              <small>Changes curve shape &amp; losses.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="boostPsi">Boost (psi)</label>
+              <input id="boostPsi" type="number" step="0.5" min="0" value="8" />
+              <small>Used for turbo &amp; supercharger only.</small>
             </div>
           </div>
 
@@ -111,6 +128,13 @@
             <h3>Approx. hp per L</h3>
             <p><span id="hpPerL">–</span> hp/L</p>
           </div>
+          <div class="summary-item">
+            <h3>Fuel @ Peak Power</h3>
+            <p>
+              <span id="fuelAtPeakLb">–</span> lb/hr
+              (<span id="fuelAtPeakGal">–</span> gal/hr)
+            </p>
+          </div>
         </div>
 
         <div class="chart-container">
@@ -126,6 +150,8 @@
                 <th>Torque (lb-ft)</th>
                 <th>VE (effective)</th>
                 <th>Mean Piston Speed (m/s)</th>
+                <th>Fuel (lb/hr)</th>
+                <th>Fuel (gal/hr)</th>
               </tr>
             </thead>
             <tbody>
