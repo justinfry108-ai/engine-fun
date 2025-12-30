@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Simple Engine Power Simulator</title>
+  <title>Simple Engine Power Simulator v3</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="styles.css" />
   <!-- Chart.js CDN -->
@@ -11,10 +11,10 @@
 <body>
   <div class="app">
     <header class="app-header">
-      <h1>Simple Engine Power Simulator</h1>
+      <h1>Simple Engine Power Simulator v3</h1>
       <p>
-        Enter basic engine specs and estimate horsepower &amp; torque across the rev range.
-        This is a toy model, not a dyno – but it’s fun to play with.
+        Toy engine model to explore how bore, stroke, compression, fuel, boost, and valvetrain
+        change power, torque, airflow, and fuel consumption. Not a real dyno – just a nerd tool.
       </p>
     </header>
 
@@ -24,33 +24,40 @@
         <h2>Engine Parameters</h2>
         <form id="engine-form">
           <div class="grid">
-            <div class="form-group">
-              <label for="displacementL">Displacement (L)</label>
-              <input id="displacementL" type="number" step="0.1" min="0.2" value="2.0" required />
-              <small>Computed from bore, stroke &amp; cylinders.</small>
-            </div>
-
+            <!-- Geometry & RPM -->
             <div class="form-group">
               <label for="cylinders">Cylinders</label>
               <input id="cylinders" type="number" step="1" min="1" value="4" />
-              <small>Example: 4, 6, 8, etc.</small>
+              <small>1–12, e.g. 4, 6, 8.</small>
             </div>
 
             <div class="form-group">
               <label for="boreMm">Bore (mm)</label>
               <input id="boreMm" type="number" step="0.1" min="40" value="86" />
-              <small>Example: 86 mm</small>
+              <small>Bore diameter, e.g. 86 mm.</small>
             </div>
 
             <div class="form-group">
               <label for="strokeMm">Stroke (mm)</label>
               <input id="strokeMm" type="number" step="0.1" min="40" value="86" />
-              <small>Example: 86 mm</small>
+              <small>Stroke length, e.g. 86 mm.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="displacementL">Displacement (L)</label>
+              <input id="displacementL" type="number" step="0.01" value="2.00" readonly />
+              <small>Calculated from bore, stroke, &amp; cylinders.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="compressionRatio">Compression Ratio</label>
+              <input id="compressionRatio" type="number" step="0.1" min="6" max="20" value="10.5" />
+              <small>e.g. 10.5 for gas, 17 for diesel.</small>
             </div>
 
             <div class="form-group">
               <label for="redlineRpm">Redline (RPM)</label>
-              <input id="redlineRpm" type="number" step="100" min="3000" value="7000" required />
+              <input id="redlineRpm" type="number" step="100" min="3000" value="7500" />
               <small>Max simulated RPM.</small>
             </div>
 
@@ -60,24 +67,26 @@
               <small>Resolution of the curve.</small>
             </div>
 
+            <!-- Breathing / VE -->
             <div class="form-group">
-              <label for="vePeak">Peak Volumetric Efficiency (%)</label>
-              <input id="vePeak" type="number" step="1" min="50" max="120" value="95" />
-              <small>100% ≈ very well-breathing engine.</small>
+              <label for="vePeak">Base Peak VE (%)</label>
+              <input id="vePeak" type="number" step="1" min="60" max="130" value="95" />
+              <small>Best-case volumetric efficiency.</small>
             </div>
 
             <div class="form-group">
-              <label for="sizePenalty">Size Efficiency Penalty</label>
+              <label for="sizePenalty">Size Penalty (%/L)</label>
               <input id="sizePenalty" type="number" step="0.5" min="0" max="10" value="3" />
-              <small>% hp/L penalty per extra liter over 2.0L.</small>
+              <small>hp/L penalty per liter over 2.0 L.</small>
             </div>
 
             <div class="form-group">
-              <label for="pistonSpeedLimit">Piston Speed Soft Limit (m/s)</label>
+              <label for="pistonSpeedLimit">Piston Speed Limit (m/s)</label>
               <input id="pistonSpeedLimit" type="number" step="1" min="15" value="25" />
-              <small>Above this, VE gradually falls.</small>
+              <small>Above this, VE gets reduced.</small>
             </div>
 
+            <!-- Fuel & Induction -->
             <div class="form-group">
               <label for="fuelType">Fuel Type</label>
               <select id="fuelType">
@@ -85,7 +94,7 @@
                 <option value="diesel">Diesel</option>
                 <option value="methanol">Methanol</option>
               </select>
-              <small>Affects torque shape &amp; fuel use.</small>
+              <small>Changes BSFC, knock limit, shape.</small>
             </div>
 
             <div class="form-group">
@@ -95,13 +104,34 @@
                 <option value="turbo">Turbocharger</option>
                 <option value="supercharger">Supercharger</option>
               </select>
-              <small>Changes curve shape &amp; losses.</small>
+              <small>Turbo = high-end, SC = low-end punch.</small>
             </div>
 
             <div class="form-group">
               <label for="boostPsi">Boost (psi)</label>
               <input id="boostPsi" type="number" step="0.5" min="0" value="8" />
-              <small>Used for turbo &amp; supercharger only.</small>
+              <small>Used only for turbo &amp; supercharger.</small>
+            </div>
+
+            <!-- Valvetrain -->
+            <div class="form-group">
+              <label for="valvetrainType">Valvetrain</label>
+              <select id="valvetrainType">
+                <option value="pushrod">Pushrod (OHV)</option>
+                <option value="sohc">SOHC</option>
+                <option value="dohc" selected>DOHC</option>
+              </select>
+              <small>Impacts high vs low RPM breathing.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="valvesPerCyl">Valves per Cylinder</label>
+              <select id="valvesPerCyl">
+                <option value="2">2 valves</option>
+                <option value="3">3 valves</option>
+                <option value="4" selected>4 valves</option>
+              </select>
+              <small>More valves = better high RPM flow.</small>
             </div>
           </div>
 
@@ -125,15 +155,20 @@
             <p><span id="peakTq">–</span> lb-ft @ <span id="peakTqRpm">–</span> rpm</p>
           </div>
           <div class="summary-item">
-            <h3>Approx. hp per L</h3>
+            <h3>hp per Liter</h3>
             <p><span id="hpPerL">–</span> hp/L</p>
           </div>
           <div class="summary-item">
             <h3>Fuel @ Peak Power</h3>
-            <p>
-              <span id="fuelAtPeakLb">–</span> lb/hr
-              (<span id="fuelAtPeakGal">–</span> gal/hr)
-            </p>
+            <p><span id="fuelPeakLb">–</span> lb/hr (<span id="fuelPeakGal">–</span> gal/hr)</p>
+          </div>
+          <div class="summary-item">
+            <h3>BMEP @ Peak Power</h3>
+            <p><span id="bmepPeakPsi">–</span> psi</p>
+          </div>
+          <div class="summary-item">
+            <h3>Airflow @ Peak Power</h3>
+            <p><span id="cfmPeak">–</span> CFM</p>
           </div>
         </div>
 
@@ -148,8 +183,10 @@
                 <th>RPM</th>
                 <th>HP</th>
                 <th>Torque (lb-ft)</th>
-                <th>VE (effective)</th>
-                <th>Mean Piston Speed (m/s)</th>
+                <th>VE (%)</th>
+                <th>Piston Speed (m/s)</th>
+                <th>BMEP (psi)</th>
+                <th>Airflow (CFM)</th>
                 <th>Fuel (lb/hr)</th>
                 <th>Fuel (gal/hr)</th>
               </tr>
@@ -164,7 +201,7 @@
 
     <footer class="app-footer">
       <p>
-        This is a very simplified educational model – not a real dyno. Tune responsibly.
+        Educational toy model only. Don’t tune your real engine off this. Yet 😏
       </p>
     </footer>
   </div>
