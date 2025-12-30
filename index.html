@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Engine Simulator – BMEP-Based Toy Dyno</title>
+  <title>Engine Simulator – BMEP Toy Dyno v4</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="styles.css" />
   <!-- Chart.js -->
@@ -11,11 +11,11 @@
 <body>
   <div class="app">
     <header class="app-header">
-      <h1>Engine Simulator – BMEP-Based Toy Dyno</h1>
+      <h1>Engine Simulator – BMEP Toy Dyno v4</h1>
       <p>
-        Build an engine concept, and this model estimates torque, power, BMEP, airflow, and fuel use
-        across the RPM band. It’s driven by BMEP → torque → horsepower, not magic constants.
-        <strong>Educational use only – not a live tuning tool.</strong>
+        Build an engine concept and this tool estimates torque, power, BMEP, airflow, and fuel use
+        across the RPM band using a BMEP → torque → horsepower model.
+        <strong>Educational use only – not a real tuning tool.</strong>
       </p>
     </header>
 
@@ -29,14 +29,14 @@
           <label for="presetSelect">Quick Presets</label>
           <select id="presetSelect">
             <option value="custom" selected>Custom / Manual</option>
-            <option value="k20c1">Honda K20C1 – 2.0T</option>
-            <option value="k24z7">Honda K24Z7 – 2.4 NA</option>
+            <option value="k20c1">Honda K20C1 – 2.0T (Type R)</option>
+            <option value="k24z7">Honda K24Z7 – 2.4 NA (Si)</option>
             <option value="coyote50">Ford Coyote 5.0 – NA</option>
             <option value="ls3">GM LS3 6.2 – NA</option>
             <option value="l15b7">Honda L15B7 – 1.5T</option>
             <option value="cummins67">6.7L Turbo Diesel</option>
           </select>
-          <small>Loads a baseline similar to real engines. You can still tweak everything.</small>
+          <small>Loads a baseline close to real engines, then you can tweak.</small>
         </div>
 
         <form id="engine-form">
@@ -51,7 +51,7 @@
               <option value="methanol_race">Methanol – Race (NA/Turbo)</option>
             </select>
             <small>
-              Mode picks the fuel, typical BMEP range, and knock/boost behavior. Details below refine it.
+              Mode controls fuel type, BMEP range, and knock / boost limits. Other options refine it.
             </small>
           </div>
 
@@ -80,14 +80,14 @@
             <div class="form-group">
               <label for="displacementL">Displacement (L)</label>
               <input id="displacementL" type="number" step="0.01" value="2.00" readonly />
-              <small>Computed from bore, stroke & cylinders.</small>
+              <small>Calculated from bore, stroke & cylinders.</small>
             </div>
 
             <div class="form-group">
               <label for="compressionRatio">Compression Ratio</label>
               <input id="compressionRatio" type="number" step="0.1" min="6" max="25" value="10.5" />
               <small>
-                Gas NA: ~9–11:1 · Gas turbo: ~9–10:1 · Diesel: ~16–18:1 · Methanol race: ~12–15:1.
+                Gas NA: ~9–11 · Gas turbo: ~9–10 · Diesel: ~16–18 · Methanol: ~12–15.
               </small>
             </div>
 
@@ -109,19 +109,19 @@
             <div class="form-group">
               <label for="vePeak">Base Peak VE (%)</label>
               <input id="vePeak" type="number" step="1" min="60" max="130" value="95" />
-              <small>Best-case volumetric efficiency around peak torque.</small>
+              <small>Best-case VE around peak torque.</small>
             </div>
 
             <div class="form-group">
               <label for="sizePenalty">Size Penalty (%/L over 2 L)</label>
               <input id="sizePenalty" type="number" step="0.5" min="0" max="10" value="3" />
-              <small>hp/L penalty as displacement grows above 2 L.</small>
+              <small>hp/L penalty as displacement grows above 2.0 L.</small>
             </div>
 
             <div class="form-group">
               <label for="pistonSpeedLimit">Piston Speed Limit (m/s)</label>
               <input id="pistonSpeedLimit" type="number" step="1" min="15" value="25" />
-              <small>Above this, torque is reduced for stress & friction.</small>
+              <small>Above this, torque drops from stress/friction.</small>
             </div>
           </div>
 
@@ -131,31 +131,31 @@
               <label for="boostPsi">Boost (psi)</label>
               <input id="boostPsi" type="number" step="0.5" min="0" value="8" />
               <small>
-                Used for turbo/supercharged modes. NA gas ignores this. Diesel & methanol use it when turbo.
+                Used for turbo/supercharged modes. Gas NA ignores this. Diesel & methanol use it when turbo.
               </small>
             </div>
 
             <div class="form-group">
-              <label for="methanolInduction">Methanol Induction (only used in Methanol mode)</label>
+              <label for="methanolInduction">Methanol Induction</label>
               <select id="methanolInduction">
                 <option value="na" selected>NA</option>
                 <option value="turbo">Turbo</option>
               </select>
-              <small>Methanol mode can be NA or turbo; other modes ignore this.</small>
+              <small>Only used when mode = Methanol Race. Ignored otherwise.</small>
             </div>
 
             <div class="form-group">
-              <label for="valvetrainType">Valvetrain (gas modes)</label>
+              <label for="valvetrainType">Valvetrain (Gas modes)</label>
               <select id="valvetrainType">
                 <option value="pushrod">Pushrod (OHV)</option>
                 <option value="sohc">SOHC</option>
                 <option value="dohc" selected>DOHC</option>
               </select>
-              <small>Affects power curve shape in gasoline modes. Diesels mostly ignore this.</small>
+              <small>Impacts NA & boosted gasoline curve shape. Diesels mostly ignore this.</small>
             </div>
 
             <div class="form-group">
-              <label for="valvesPerCyl">Valves per Cylinder (gas modes)</label>
+              <label for="valvesPerCyl">Valves per Cylinder (Gas)</label>
               <select id="valvesPerCyl">
                 <option value="2">2 valves</option>
                 <option value="3">3 valves</option>
@@ -231,9 +231,8 @@
 
     <footer class="app-footer">
       <p>
-        This is a simplified BMEP-based simulation. It can be useful for learning and rough planning,
-        but <strong>do not</strong> set timing, fueling, or boost on a real engine purely from this tool.
-        Always use proper logging, wideband data, and dyno tuning.
+        Simplified BMEP-based model. Great for playing with concepts. 
+        <strong>Not</strong> safe for real tuning decisions without actual logs/dyno.
       </p>
     </footer>
   </div>
